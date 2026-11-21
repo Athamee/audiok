@@ -1,5 +1,5 @@
 pub(crate) const JA: &[(&str, &str)] = &[
-    ("audiok est déjà lancé.", "audiok は既に起動しています。"),
+    ("audiok est déjà lancé", "audiok は既に起動しています"),
     ("Apparence — image de fond manquante", "外観 — 背景画像が見つかりません"),
     ("Ctrl+Maj+{}", "Ctrl+Shift+{}"),
     ("Globaux", "グローバル"),

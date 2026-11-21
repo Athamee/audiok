@@ -1,5 +1,5 @@
 pub(crate) const ZH: &[(&str, &str)] = &[
-    ("audiok est déjà lancé.", "audiok 已在运行。"),
+    ("audiok est déjà lancé", "audiok 已在运行"),
     ("Apparence — image de fond manquante", "外观 — 背景图片缺失"),
     ("Ctrl+Maj+{}", "Ctrl+Shift+{}"),
     ("Globaux", "全局"),

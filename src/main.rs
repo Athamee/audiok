@@ -2575,15 +2575,15 @@ fn acquire_single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
 }
 
 fn warn_already_running() {
-    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
 
-    let text = windows::core::HSTRING::from(tr("audiok est déjà lancé."));
+    let text = windows::core::HSTRING::from(tr("audiok est déjà lancé"));
     unsafe {
         MessageBoxW(
             None,
             &text,
             windows::core::w!("audiok"),
-            MB_OK | MB_ICONWARNING,
+            MB_OK | MB_ICONINFORMATION,
         );
     }
 }
