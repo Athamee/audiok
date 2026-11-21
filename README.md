@@ -15,6 +15,12 @@ Gestionnaire audio pour Windows 10/11 écrit en Rust. `audiok` capture les micro
 - Langues : français, anglais, allemand, espagnol, italien, portugais, chinois, japonais, plus le choix `Auto` basé sur la langue système.
 - Icône dans la zone de notification : clic gauche pour afficher/masquer la fenêtre, menu pour quitter ou activer le démarrage avec Windows.
 
+## Captures d'écran
+
+![Capture 1](images/screenshots/image01.png)
+![Capture 2](images/screenshots/image02.png)
+![Capture 3](images/screenshots/image03.png)
+
 ## Lancer l'application
 
 Téléchargez `audiok.exe` depuis l'onglet **Releases** et lancez-le directement : aucune installation, aucun VS Code, aucun terminal et aucune fenêtre console ne sont nécessaires.
@@ -64,11 +70,19 @@ Les raccourcis globaux sont actifs tant qu'`audiok` tourne. En cas de conflit av
 
 Prérequis : Rust stable (voir `rust-toolchain.toml`) et le toolchain Windows MSVC.
 
-```bash
-cargo build --release
+Depuis l'invite de commande Windows :
+
+```bat
+build_release.cmd
 ```
 
-L'exécutable est généré dans `target\release\audiok.exe`. L'attribut `windows_subsystem = "windows"` supprime la console ; les messages restent disponibles dans le fichier de journal.
+Depuis Git Bash :
+
+```bash
+cmd //c build_release.cmd
+```
+
+`build_release.cmd` remplace `cargo build --release` : il compile puis copie l'exécutable en `target\release\audiok_<version>.exe`, la version étant lue dans `Cargo.toml` (même source que `CARGO_PKG_VERSION`). `target\release\audiok.exe` reste généré. L'attribut `windows_subsystem = "windows"` supprime la console ; les messages restent disponibles dans le fichier de journal.
 
 Vérifications :
 

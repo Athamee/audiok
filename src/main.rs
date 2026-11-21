@@ -2554,10 +2554,48 @@ impl eframe::App for AudiokApp {
     }
 }
 
+fn acquire_single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let Ok(handle) = (unsafe {
+        CreateMutexW(
+            None,
+            true,
+            windows::core::w!("Local\\audiok-single-instance"),
+        )
+    }) else {
+        return Some(HANDLE::default());
+    };
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        None
+    } else {
+        Some(handle)
+    }
+}
+
+fn warn_already_running() {
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+
+    let text = windows::core::HSTRING::from(tr("audiok est déjà lancé."));
+    unsafe {
+        MessageBoxW(
+            None,
+            &text,
+            windows::core::w!("audiok"),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
+}
+
 fn main() -> eframe::Result {
-    logging::init();
     let settings = config::load_settings();
     i18n::set(settings.language.unwrap_or_else(i18n::system_language));
+    let Some(_instance) = acquire_single_instance() else {
+        warn_already_running();
+        return Ok(());
+    };
+    logging::init();
     let start_in_tray = std::env::args().any(|arg| arg == TRAY_ARG);
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([640.0, 600.0])

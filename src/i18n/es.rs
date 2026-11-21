@@ -1,4 +1,5 @@
 pub(crate) const ES: &[(&str, &str)] = &[
+    ("audiok est déjà lancé.", "audiok ya está en ejecución."),
     ("Apparence — image de fond manquante", "Apariencia — imagen de fondo ausente"),
     ("Ctrl+Maj+{}", "Ctrl+Mayús+{}"),
     ("Globaux", "Global"),
