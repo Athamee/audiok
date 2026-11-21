@@ -1,2 +1,0 @@
-- PNG carré 512×512 (min. 256), RVB/RGBA, transparence acceptée → icône fenêtre/barre des tâches (décodage direct via eframe::icon_data::from_png_bytes, dispo dans eframe 0.37).
-- Pour l'icône de l'exe dans l'Explorateur, il faut un .ico multi-tailles (16, 24, 32, 48, 64, 128, 256). Si tu ne peux produire que le PNG, on fera la fenêtre d'abord et l'exe plus tard.
