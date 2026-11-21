@@ -1,0 +1,53 @@
+[package]
+name = "audiok"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Framework UI Immediate Mode
+eframe = "0.37"
+
+# Décodage des images de fond (PNG/JPEG/WebP)
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+
+# Dialogue natif de sélection de fichier pour l'image de fond
+rfd = { version = "0.18.0", default-features = false }
+
+# Icône systray et menu (fenêtre masquée au lieu de quitter)
+tray-icon = { version = "0.26.1", default-features = false }
+
+# Démarrage avec Windows (registre HKCU\Run)
+auto-launch = "0.6.0"
+
+# Sérialisation & Persistance de la configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Détection de la langue du système
+sys-locale = "0.3.2"
+
+# Réduction de bruit micro (RNNoise) + resampling vers 48 kHz
+nnnoiseless = { version = "0.5.2", default-features = false }
+rubato = { version = "0.16.2", default-features = false }
+
+# Core windows-rs : requis par la macro #[implement] (callbacks COM)
+windows-core = "0.62"
+
+# Bindings natifs Win32 pour la gestion fine des sessions et devices WASAPI
+windows = { version = "0.62", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"

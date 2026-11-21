@@ -1,0 +1,9 @@
+/target
+/audiok_projet
+/config.json
+AGENTS.md
+.gitignore
+ROADMAP.md
+ROADMAP_ARCHIVE.md
+rust-toolchain.toml
+package-lock.json
