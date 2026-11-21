@@ -9,5 +9,5 @@ if not defined VERSION (
     echo Version introuvable dans Cargo.toml 1>&2
     exit /b 1
 )
-copy /Y "target\release\audiok.exe" "target\release\audiok_%VERSION%.exe" >nul
-echo target\release\audiok_%VERSION%.exe
+copy /Y "target\release\audiok.exe" "target\release\audiok_%VERSION%_win_x64.exe" >nul
+echo target\release\audiok_%VERSION%_win_x64.exe
