@@ -91,3 +91,7 @@ cargo fmt --check
 cargo clippy
 cargo test
 ```
+
+## Licence
+
+`audiok` est distribué sous licence MIT : voir [LICENSE.md](LICENSE.md). Les dépendances tierces et le pilote VAC conservent leur propre licence.
