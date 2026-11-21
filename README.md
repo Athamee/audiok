@@ -23,9 +23,9 @@ Gestionnaire audio pour Windows 10/11 écrit en Rust. `audiok` capture les micro
 
 ## Lancer l'application
 
-Téléchargez `audiok.exe` depuis l'onglet **Releases** et lancez-le directement : aucune installation, aucun VS Code, aucun terminal et aucune fenêtre console ne sont nécessaires.
+Téléchargez l'exécutable versionné `audiok_<version>.exe` (par exemple `audiok_0.1.0.exe`) depuis l'onglet **Releases** et lancez-le directement : aucune installation, aucun VS Code, aucun terminal et aucune fenêtre console ne sont nécessaires.
 
-- `audiok.exe --tray` : démarre masqué dans la zone de notification (paramètre utilisé par « Démarrer avec Windows »).
+- `audiok_<version>.exe --tray` : démarre masqué dans la zone de notification (paramètre utilisé par « Démarrer avec Windows »).
 - Pour quitter proprement, utilisez le menu de l'icône systray : les redirections et les défauts Windows sont alors restaurés.
 
 Le code n'effectue aucun appel réseau.
