@@ -35,6 +35,19 @@ pub(crate) fn valid_key(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+const FALLBACK_APP_PREFIX: &str = "processus ";
+
+pub(crate) fn is_fallback_app_exe(exe: &str) -> bool {
+    exe.to_ascii_lowercase().starts_with(FALLBACK_APP_PREFIX)
+}
+
+pub(crate) fn is_fallback_string_key(value: &str) -> bool {
+    value.strip_prefix("app:").is_some_and(|rest| {
+        let exe = rest.split('|').next().unwrap_or(rest);
+        is_fallback_app_exe(exe)
+    })
+}
+
 pub(crate) fn sanitize_owned_text(text: &mut String) {
     if text.chars().any(char::is_control) {
         *text = text
@@ -168,10 +181,10 @@ impl StripProfile {
     }
 }
 
-fn valid_endpoint_key(key: &EndpointKey) -> bool {
+pub(crate) fn valid_endpoint_key(key: &EndpointKey) -> bool {
     match key {
         EndpointKey::Hardware(id) => valid_key(id),
-        EndpointKey::App { exe, .. } => valid_key(exe),
+        EndpointKey::App { exe, .. } => valid_key(exe) && !is_fallback_app_exe(exe),
     }
 }
 
@@ -260,7 +273,8 @@ impl Profile {
         }
         self.master.sanitize();
         self.appearance.sanitize();
-        self.cable_assignment.retain(|key, _| valid_key(key));
+        self.cable_assignment
+            .retain(|key, _| valid_key(key) && !is_fallback_string_key(key));
         while self.cable_assignment.len() > MAX_CABLES {
             self.cable_assignment.pop_last();
         }
@@ -433,6 +447,37 @@ mod tests {
         );
         assert_eq!(profile.appearance.image.as_deref(), Some("bg .png"));
         assert_eq!(profile.appearance.scrim, 0);
+    }
+
+    #[test]
+    fn sanitize_drops_processus_fallback_keys() {
+        let fallback = EndpointKey::App {
+            exe: "Processus 7292".into(),
+            role: AppRole::Other,
+        };
+        let stable = EndpointKey::App {
+            exe: "telegram.exe".into(),
+            role: AppRole::Other,
+        };
+        let mut profile = Profile {
+            strips: vec![StripProfile {
+                outputs: vec![fallback.clone(), stable.clone()],
+                mix_gains: BTreeMap::from([(fallback.clone(), 1.0), (stable.clone(), 0.5)]),
+                ..Default::default()
+            }],
+            cable_assignment: BTreeMap::from([
+                ("app:processus 7292".into(), 2),
+                ("app:telegram.exe".into(), 1),
+            ]),
+            ..Default::default()
+        };
+        profile.sanitize();
+        let strip = &profile.strips[0];
+        assert_eq!(strip.outputs, vec![stable.clone()]);
+        assert!(!strip.mix_gains.contains_key(&fallback));
+        assert_eq!(strip.mix_gains.get(&stable), Some(&0.5));
+        assert!(!profile.cable_assignment.contains_key("app:processus 7292"));
+        assert_eq!(profile.cable_assignment.get("app:telegram.exe"), Some(&1));
     }
 
     #[test]

@@ -108,7 +108,9 @@ pub fn load_settings() -> Settings {
 }
 
 pub fn save_settings(settings: &Settings) {
-    save_to(&config_path(), settings);
+    let mut settings = settings.clone();
+    settings.sanitize();
+    save_to(&config_path(), &settings);
 }
 
 #[cfg(test)]

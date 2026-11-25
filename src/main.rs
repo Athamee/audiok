@@ -15,7 +15,8 @@ mod ui;
 
 use audio::devices::{endpoint_pid, AudioEndpoint};
 use config::profile::{
-    AppRole, AppearanceProfile, EndpointKey, MasterProfile, Profile, StripProfile, DEFAULT_PROFILE,
+    is_fallback_string_key, valid_endpoint_key, AppRole, AppearanceProfile, EndpointKey,
+    MasterProfile, Profile, StripProfile, DEFAULT_PROFILE,
 };
 use i18n::tr;
 
@@ -32,7 +33,8 @@ const SCREEN_MARGIN: f32 = 32.0;
 const WIDTH_EPSILON: f32 = 1.0;
 const RESIZE_EPSILON: f32 = 1.0;
 const MIN_WINDOW_WIDTH: f32 = 420.0;
-const LANGUAGE_COMBO_WIDTH: f32 = 140.0;
+const LANGUAGE_COMBO_WIDTH: f32 = 45.0;
+const LANGUAGE_COMBO_PADDING: f32 = 3.0;
 const TRAY_ARG: &str = "--tray";
 
 struct Rename {
@@ -112,6 +114,9 @@ struct AudiokApp {
     pending_outputs: HashMap<EndpointKey, Vec<EndpointKey>>,
     redirected: HashMap<u32, [Option<String>; 3]>,
     redirect_retry: HashMap<u32, Instant>,
+    diag_redirect_desired: Vec<u32>,
+    diag_redirect_actual: Vec<u32>,
+    diag_app_routes: Vec<(String, String)>,
     sink_warned: bool,
     last_fingerprint: Option<u64>,
     dirty_since: Option<Instant>,
@@ -180,6 +185,13 @@ fn appearance_button(ui: &mut egui::Ui, warning: bool) -> egui::Response {
     })
 }
 
+fn language_selector_text(language: Option<i18n::Language>) -> String {
+    match language {
+        Some(language) => language.code().to_string(),
+        None => "🌐".to_string(),
+    }
+}
+
 pub(crate) const MAX_SHORTCUT_SLOT: u8 = 10;
 
 pub(crate) fn shortcut_label(slot: u8) -> String {
@@ -211,7 +223,9 @@ fn shortcut_lexicon_lines(settings: &config::Settings) -> Vec<String> {
         tr("  Route les tranches d'entrée vers les sorties ; le bypass remet Windows en défaut.")
             .to_string(),
     );
-    lines.push(tr("  Casque/Mixe : écoute CUE (pré-fader) ou un mixe post-fader.").to_string());
+    lines.push(
+        tr("  MIXE/PFL : écoute post-fader du mixe sélectionné ou PFL pré-fader.").to_string(),
+    );
     lines.push(
         tr("  Profils : sauvegardent routages, volumes, apparence et raccourcis.").to_string(),
     );
@@ -358,9 +372,20 @@ impl AudiokApp {
             .map(|strip| strip.id.clone())
             .chain(self.cache.keys().cloned())
             .collect();
+        let previous_present: HashSet<String> = self
+            .strips
+            .iter()
+            .filter(|strip| strip.present)
+            .map(|strip| strip.id.clone())
+            .collect();
+        let previous_grace: HashSet<String> = self
+            .strips
+            .iter()
+            .filter(|strip| !strip.present)
+            .map(|strip| strip.id.clone())
+            .collect();
         let (strips, cache) = sync_strips(
             &sources,
-            &outputs,
             std::mem::take(&mut self.strips),
             std::mem::take(&mut self.cache),
             trim,
@@ -384,14 +409,49 @@ impl AudiokApp {
         self.apply_pending_profile(&sources);
         self.retry_pending_outputs(&captures);
         self.vac.refresh();
-        let apps = destination_apps(&self.strips, self.master.cue_device.as_deref());
-        let pairs = app_pairs(&apps, &self.app_keys);
-        if self.master.bypass {
-            self.vac.restore_captures();
-        } else {
-            self.vac.apply_policies(&pairs);
-        }
         self.captures = captures;
+        self.log_strip_transitions(&previous_present, &previous_grace);
+    }
+
+    fn diag_strip_state(&self, strip: &ui::strip::Strip) -> String {
+        let pid = endpoint_pid(&strip.id);
+        let destinations = app_selections(&self.strips);
+        let dest = pid.is_some_and(|pid| destinations.contains(&format!("app:{pid}").as_str()));
+        let redirected = pid.is_some_and(|pid| self.redirected.contains_key(&pid));
+        let alive = pid.is_some_and(audio::devices::process_alive);
+        format!("dest={dest} redirect={redirected} vivant={alive}")
+    }
+
+    fn log_strip_transitions(
+        &self,
+        previous_present: &HashSet<String>,
+        previous_grace: &HashSet<String>,
+    ) {
+        for id in previous_present {
+            match self.strips.iter().find(|strip| &strip.id == id) {
+                Some(strip) if !strip.present => logging::log(
+                    "diag",
+                    &format!(
+                        "entrée grâce {} ({}) {}",
+                        strip.name,
+                        strip.id,
+                        self.diag_strip_state(strip)
+                    ),
+                ),
+                None => logging::log("diag", &format!("retrait direct {id}")),
+                _ => {}
+            }
+        }
+        for id in previous_grace {
+            match self.strips.iter().find(|strip| &strip.id == id) {
+                Some(strip) if strip.present => logging::log(
+                    "diag",
+                    &format!("retour (fin de grâce) {} ({})", strip.name, strip.id),
+                ),
+                None => logging::log("diag", &format!("retrait après grâce {id}")),
+                _ => {}
+            }
+        }
     }
 
     fn apply_output_redirects(&mut self, app_pids: &HashSet<u32>, sink: Option<&str>) {
@@ -585,6 +645,14 @@ impl AudiokApp {
                 Some(strip) => apply_strip_profile(strip, slot, &output_map),
                 None => continue,
             };
+            logging::log(
+                "rebind",
+                &format!(
+                    "{id} profil restauré (ambigus={} non résolus={})",
+                    ambiguous.len(),
+                    unresolved.len()
+                ),
+            );
             if !unresolved.is_empty() {
                 self.pending_outputs.insert(key, unresolved);
             }
@@ -625,9 +693,10 @@ impl AudiokApp {
                                 .iter_mut()
                                 .find(|slot| slot.is_none())
                             {
-                                Some(slot) => *slot = Some(id),
-                                None => strip.selected_outputs.push(Some(id)),
+                                Some(slot) => *slot = Some(id.clone()),
+                                None => strip.selected_outputs.push(Some(id.clone())),
                             }
+                            logging::log("rebind", &format!("{} sortie {id} rebindée", strip.id));
                         }
                     }
                     _ => unresolved.push(key),
@@ -652,15 +721,19 @@ impl AudiokApp {
                 continue;
             }
             let source = endpoint_key(&strip.id, &captures);
+            if !valid_endpoint_key(&source) {
+                continue;
+            }
             let mut outputs: Vec<EndpointKey> = strip
                 .selected_outputs
                 .iter()
                 .flatten()
                 .map(|id| endpoint_key(id, &captures))
+                .filter(valid_endpoint_key)
                 .collect();
             if let Some(unresolved) = self.pending_outputs.get(&source) {
                 for key in unresolved {
-                    if !outputs.contains(key) {
+                    if valid_endpoint_key(key) && !outputs.contains(key) {
                         outputs.push(key.clone());
                     }
                 }
@@ -692,7 +765,12 @@ impl AudiokApp {
                 cue_mix_enabled: self.master.cue_mix_enabled,
                 mute_all: self.master.mute_all,
             },
-            cable_assignment: self.vac.preferences(),
+            cable_assignment: self
+                .vac
+                .preferences()
+                .into_iter()
+                .filter(|(key, _)| !is_fallback_string_key(key))
+                .collect(),
             shortcut: previous.shortcut,
             appearance: previous.appearance.clone(),
         }
@@ -978,33 +1056,33 @@ impl AudiokApp {
         }
         let detected = i18n::system_language();
         let auto_label = format!("🌐 AUTO {} {}", detected.code(), detected.name());
-        let label = match self.settings.language {
-            Some(language) => language.label(),
-            None => auto_label.clone(),
-        };
+        let label = language_selector_text(self.settings.language);
         let mut selected = self.settings.language;
-        let _ = egui::ComboBox::from_id_salt("language_combo")
-            .width(LANGUAGE_COMBO_WIDTH)
-            .truncate()
-            .selected_text(ui::combo_text(ui, &label, LANGUAGE_COMBO_WIDTH))
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_value(&mut selected, None, auto_label.as_str())
-                    .clicked()
-                {
-                    ui.close();
-                }
-                for language in i18n::Language::all() {
+        ui.scope(|ui| {
+            ui.spacing_mut().button_padding.x = LANGUAGE_COMBO_PADDING;
+            let _ = egui::ComboBox::from_id_salt("language_combo")
+                .width(LANGUAGE_COMBO_WIDTH)
+                .truncate()
+                .selected_text(ui::combo_text(ui, &label, LANGUAGE_COMBO_WIDTH))
+                .show_ui(ui, |ui| {
                     if ui
-                        .selectable_value(&mut selected, Some(*language), language.label())
+                        .selectable_value(&mut selected, None, auto_label.as_str())
                         .clicked()
                     {
                         ui.close();
                     }
-                }
-            })
-            .response
-            .on_hover_text(tr("Langue"));
+                    for language in i18n::Language::all() {
+                        if ui
+                            .selectable_value(&mut selected, Some(*language), language.label())
+                            .clicked()
+                        {
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(tr("Langue"));
+        });
         if selected != self.settings.language {
             i18n::set(selected.unwrap_or(detected));
             self.settings.language = selected;
@@ -1620,14 +1698,56 @@ impl AudiokApp {
     }
 
     fn route(&mut self, log_bypass: bool) -> HashMap<String, String> {
+        let now = Instant::now();
         let apps = destination_apps(&self.strips, self.master.cue_device.as_deref());
         let pairs = app_pairs(&apps, &self.app_keys);
+        let policy_apps = input_policy_apps(
+            &apps,
+            &self.strips,
+            &self.redirected,
+            now,
+            STRIP_GRACE,
+            audio::devices::process_alive,
+        );
+        let policy_pairs = app_pairs(&policy_apps, &self.app_keys);
+        if self.master.bypass {
+            self.vac.restore_captures();
+        } else {
+            self.vac.apply_policies(&policy_pairs);
+        }
         let app_routes = self.vac.resolve(&pairs);
+        let mut mapping: Vec<(String, String)> = app_routes
+            .iter()
+            .map(|(app, render)| (app.clone(), render.clone()))
+            .collect();
+        mapping.sort();
+        if mapping != self.diag_app_routes {
+            logging::log("diag", &format!("vac apps -> render: {mapping:?}"));
+            self.diag_app_routes = mapping;
+        }
         let routes =
             desired_routes_with_captures(&self.strips, &app_routes, &self.master, &self.captures);
         let sink = self.vac.sink().map(|endpoint| endpoint.id.clone());
-        let app_pids = strip_app_pids(&self.strips);
+        let app_pids = protected_redirect_pids(
+            &self.strips,
+            &self.redirected,
+            now,
+            STRIP_GRACE,
+            audio::devices::process_alive,
+        );
         self.apply_output_redirects(&app_pids, sink.as_deref());
+        let mut desired: Vec<u32> = app_pids.iter().copied().collect();
+        desired.sort_unstable();
+        let mut actual: Vec<u32> = self.redirected.keys().copied().collect();
+        actual.sort_unstable();
+        if desired != self.diag_redirect_desired || actual != self.diag_redirect_actual {
+            logging::log(
+                "diag",
+                &format!("redirection voulue={desired:?} redirigés={actual:?}"),
+            );
+            self.diag_redirect_desired = desired;
+            self.diag_redirect_actual = actual;
+        }
         if log_bypass {
             logging::log(
                 "bypass",
@@ -2027,6 +2147,38 @@ fn destination_apps<'a>(strips: &'a [ui::strip::Strip], cue: Option<&'a str>) ->
     apps
 }
 
+fn input_policy_apps<'a>(
+    apps: &'a [&'a str],
+    strips: &[ui::strip::Strip],
+    redirected: &HashMap<u32, [Option<String>; 3]>,
+    now: Instant,
+    grace: Duration,
+    is_alive: impl Fn(u32) -> bool,
+) -> Vec<&'a str> {
+    apps.iter()
+        .copied()
+        .filter(|app| {
+            let Some(pid) = endpoint_pid(app) else {
+                return true;
+            };
+            if !is_alive(pid) {
+                return false;
+            }
+            let Some(strip) = strips
+                .iter()
+                .find(|strip| endpoint_pid(&strip.id) == Some(pid))
+            else {
+                return true;
+            };
+            strip.present
+                || (strip
+                    .last_seen
+                    .is_some_and(|seen| now.duration_since(seen) < grace)
+                    && redirected.contains_key(&pid))
+        })
+        .collect()
+}
+
 fn resolve_route_output(output: &str, app_routes: &HashMap<String, String>) -> Option<String> {
     if output.starts_with("app:") {
         app_routes.get(output).cloned()
@@ -2035,14 +2187,21 @@ fn resolve_route_output(output: &str, app_routes: &HashMap<String, String>) -> O
     }
 }
 
-fn mix_choices(strips: &[ui::strip::Strip], cue: Option<&str>) -> Vec<String> {
+fn mix_choices(
+    strips: &[ui::strip::Strip],
+    cue: Option<&str>,
+    outputs: &[AudioEndpoint],
+) -> Vec<String> {
     let mut mixes: Vec<String> = Vec::new();
     for strip in strips
         .iter()
         .filter(|strip| strip.present && strip.id != "session:0")
     {
         for output in strip.selected_outputs.iter().flatten() {
-            if Some(output.as_str()) != cue && !mixes.contains(output) {
+            if Some(output.as_str()) != cue
+                && outputs.iter().any(|endpoint| &endpoint.id == output)
+                && !mixes.contains(output)
+            {
                 mixes.push(output.clone());
             }
         }
@@ -2072,15 +2231,6 @@ fn output_gain(strip: &ui::strip::Strip, output: &str, captures: &HashSet<u32>) 
         }
     }
     strip.volume
-}
-
-fn remove_mix_gain(strip: &mut ui::strip::Strip, key: &EndpointKey) {
-    strip.mix_gains.remove(key);
-    if let EndpointKey::App { exe, .. } = key {
-        strip.mix_gains.retain(
-            |saved, _| !matches!(saved, EndpointKey::App { exe: other, .. } if other == exe),
-        );
-    }
 }
 
 fn desired_routes_with_captures(
@@ -2184,9 +2334,36 @@ fn strip_app_pids(strips: &[ui::strip::Strip]) -> HashSet<u32> {
         .collect()
 }
 
+fn protected_redirect_pids(
+    strips: &[ui::strip::Strip],
+    redirected: &HashMap<u32, [Option<String>; 3]>,
+    now: Instant,
+    grace: Duration,
+    is_alive: impl Fn(u32) -> bool,
+) -> HashSet<u32> {
+    let mut pids = strip_app_pids(strips);
+    for strip in strips {
+        if strip.present {
+            continue;
+        }
+        let in_grace = strip
+            .last_seen
+            .is_some_and(|seen| now.duration_since(seen) < grace);
+        if !in_grace {
+            continue;
+        }
+        let Some(pid) = endpoint_pid(&strip.id) else {
+            continue;
+        };
+        if pid != 0 && redirected.contains_key(&pid) && is_alive(pid) {
+            pids.insert(pid);
+        }
+    }
+    pids
+}
+
 fn sync_strips(
     sources: &[AudioEndpoint],
-    outputs: &[AudioEndpoint],
     current: Vec<ui::strip::Strip>,
     mut cache: HashMap<String, ui::strip::Strip>,
     trim: bool,
@@ -2197,7 +2374,6 @@ fn sync_strips(
         cache.insert(strip.id.clone(), strip);
     }
 
-    let output_ids: HashSet<&str> = outputs.iter().map(|o| o.id.as_str()).collect();
     let mut strips = Vec::with_capacity(sources.len());
     for source in sources {
         let mut strip = cache
@@ -2210,17 +2386,10 @@ fn sync_strips(
         strip.last_seen = Some(now);
         strip.present = true;
         if trim {
-            for selected in &mut strip.selected_outputs {
-                if let Some(id) = selected {
-                    if !id.starts_with("app:") && !output_ids.contains(id.as_str()) {
-                        *selected = None;
-                    }
-                }
-            }
+            // Drop empty selector slots so "Rafraîchir" cleans up rows that are not
+            // assigned. Assigned outputs are kept even when absent so they rebind
+            // automatically when the endpoint returns.
             strip.selected_outputs.retain(Option::is_some);
-            if strip.selected_outputs.is_empty() {
-                strip.selected_outputs.push(None);
-            }
         }
         strips.push(strip);
     }
@@ -2280,12 +2449,13 @@ fn strip_sort_key(strip: &ui::strip::Strip) -> (u8, u8, String, u8, u32, String)
 impl eframe::App for AudiokApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray(ctx);
-        if self.hidden
-            && self.hide_after_start
-            && ctx.input(|state| state.viewport().visible() == Some(true))
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.hide_after_start = false;
+        if self.hidden && self.hide_after_start {
+            let visible = ctx.input(|state| state.viewport().visible());
+            if visible == Some(false) {
+                self.hide_after_start = false;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
         }
         let actions = self
             .hotkeys
@@ -2365,8 +2535,11 @@ impl eframe::App for AudiokApp {
         self.fit_window(ui.ctx(), ui.spacing().item_spacing.x);
 
         let bypass_before = self.master.bypass;
-        let mixes = mix_choices(&self.strips, self.master.cue_device.as_deref());
-        let mut mix_reset_request = None;
+        let mixes = mix_choices(
+            &self.strips,
+            self.master.cue_device.as_deref(),
+            &self.outputs,
+        );
         let (refresh, bypass_rect, master_rect) = egui::Panel::right("master_panel")
             .resizable(false)
             .exact_size(ui::MASTER_PANEL_WIDTH)
@@ -2381,7 +2554,6 @@ impl eframe::App for AudiokApp {
                     &self.appearance_cache,
                     &mut self.rename_request,
                     &mut self.reset_request,
-                    &mut mix_reset_request,
                 )
             })
             .inner;
@@ -2410,11 +2582,7 @@ impl eframe::App for AudiokApp {
         }
 
         let captures = self.captures.clone();
-        let cue_mix = self
-            .master
-            .cue_mix_enabled
-            .then(|| self.master.cue_mix.clone())
-            .flatten();
+        let cue_mix = self.master.cue_mix.clone();
         egui::ScrollArea::horizontal().show(ui, |ui| {
             let strips_rect = ui
                 .horizontal_top(|ui| {
@@ -2487,12 +2655,6 @@ impl eframe::App for AudiokApp {
             }
         });
 
-        if let Some(mix) = mix_reset_request {
-            let key = endpoint_key(&mix, &self.captures);
-            for strip in &mut self.strips {
-                remove_mix_gain(strip, &key);
-            }
-        }
         if let Some(endpoint) = self.reset_request.take() {
             self.reset_alias(&endpoint);
         }
@@ -2635,6 +2797,29 @@ fn apply_content_text_visuals(ui: &mut egui::Ui, text_color: egui::Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_selector_shows_code_or_globe() {
+        assert_eq!(language_selector_text(Some(i18n::Language::Fr)), "FR");
+        assert_eq!(language_selector_text(Some(i18n::Language::Ja)), "JA");
+        assert_eq!(language_selector_text(None), "🌐");
+    }
+
+    #[test]
+    fn language_selector_fits_two_letter_code() {
+        egui::__run_test_ui(|ui| {
+            let overhead =
+                2.0 * LANGUAGE_COMBO_PADDING + ui.spacing().icon_width + ui.spacing().icon_spacing;
+            let available = LANGUAGE_COMBO_WIDTH - overhead;
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let width = ui
+                .painter()
+                .layout_no_wrap("FR".to_owned(), font, egui::Color32::WHITE)
+                .size()
+                .x;
+            assert!(width <= available, "code {width} px > {available} px");
+        });
+    }
 
     #[test]
     fn content_text_visuals_leave_widget_colors_untouched() {
@@ -2943,7 +3128,6 @@ mod tests {
         ];
         let (strips, _) = sync_strips(
             &sources,
-            &[],
             vec![],
             HashMap::new(),
             false,
@@ -2976,15 +3160,8 @@ mod tests {
                 kind: audio::devices::EndpointKind::Software,
             },
         ];
-        let (strips, cache) = sync_strips(
-            &sources,
-            &[],
-            vec![],
-            HashMap::new(),
-            false,
-            now,
-            STRIP_GRACE,
-        );
+        let (strips, cache) =
+            sync_strips(&sources, vec![], HashMap::new(), false, now, STRIP_GRACE);
         assert_eq!(
             ids(&strips),
             vec!["input:mic", "session:200", "session:100"]
@@ -3004,7 +3181,6 @@ mod tests {
         ];
         let (strips, cache) = sync_strips(
             &without_discord,
-            &[],
             strips,
             cache,
             false,
@@ -3019,7 +3195,6 @@ mod tests {
 
         let (strips, _) = sync_strips(
             &sources,
-            &[],
             strips,
             cache,
             false,
@@ -3047,13 +3222,11 @@ mod tests {
             kind: audio::devices::EndpointKind::Software,
         }];
 
-        let (strips, cache) =
-            sync_strips(&plain, &[], vec![], HashMap::new(), false, now, STRIP_GRACE);
+        let (strips, cache) = sync_strips(&plain, vec![], HashMap::new(), false, now, STRIP_GRACE);
         assert_eq!(strips[0].name, "Discord");
 
         let (strips, cache) = sync_strips(
             &call,
-            &[],
             strips,
             cache,
             false,
@@ -3066,7 +3239,6 @@ mod tests {
         strips[0].name = "Mon Discord".into();
         let (strips, _) = sync_strips(
             &plain,
-            &[],
             strips,
             cache,
             false,
@@ -3079,7 +3251,6 @@ mod tests {
     #[test]
     fn refresh_preserves_state_trims_and_caches() {
         let now = Instant::now();
-        let outputs = vec![endpoint("output:a"), endpoint("output:b")];
         let sources = vec![endpoint("input:x")];
 
         let mut strip = ui::strip::Strip::new("input:x".into(), "X".into());
@@ -3097,7 +3268,6 @@ mod tests {
 
         let (strips, cache) = sync_strips(
             &sources,
-            &outputs,
             vec![strip],
             HashMap::new(),
             true,
@@ -3114,12 +3284,11 @@ mod tests {
         );
         assert!(cache.is_empty());
 
-        let (strips, cache) = sync_strips(&[], &outputs, strips, cache, true, now, STRIP_GRACE);
+        let (strips, cache) = sync_strips(&[], strips, cache, true, now, STRIP_GRACE);
         assert!(strips.is_empty());
         assert!(cache.contains_key("input:x"));
 
-        let (strips, cache) =
-            sync_strips(&sources, &outputs, vec![], cache, true, now, STRIP_GRACE);
+        let (strips, cache) = sync_strips(&sources, vec![], cache, true, now, STRIP_GRACE);
         assert_eq!(strips.len(), 1);
         assert_eq!(strips[0].volume, 0.5);
         assert_eq!(strips[0].trim, 1.2);
@@ -3131,7 +3300,6 @@ mod tests {
         let sources = vec![endpoint("input:y")];
         let (strips, _) = sync_strips(
             &sources,
-            &outputs,
             vec![strip],
             HashMap::new(),
             false,
@@ -3145,26 +3313,23 @@ mod tests {
         let sources = vec![endpoint("input:z")];
         let (strips, _) = sync_strips(
             &sources,
-            &outputs,
             vec![strip],
             HashMap::new(),
             true,
             now,
             STRIP_GRACE,
         );
-        assert_eq!(strips[0].selected_outputs, vec![None]);
+        assert_eq!(strips[0].selected_outputs, vec![Some("output:gone".into())]);
     }
 
     #[test]
     fn disappeared_strips_are_retained_during_grace_period() {
         let now = Instant::now();
-        let outputs = vec![];
         let sources = vec![endpoint("session:1")];
         let strip = ui::strip::Strip::new("session:1".into(), "App".into());
 
         let (strips, cache) = sync_strips(
             &sources,
-            &outputs,
             vec![strip],
             HashMap::new(),
             false,
@@ -3176,7 +3341,6 @@ mod tests {
 
         let (strips, cache) = sync_strips(
             &[],
-            &outputs,
             strips,
             cache,
             false,
@@ -3188,7 +3352,6 @@ mod tests {
 
         let (strips, cache) = sync_strips(
             &[],
-            &outputs,
             strips,
             cache,
             false,
@@ -3210,7 +3373,7 @@ mod tests {
             cache.insert(strip.id.clone(), strip);
         }
 
-        let (_, cache) = sync_strips(&[], &[], vec![], cache, false, now, STRIP_GRACE);
+        let (_, cache) = sync_strips(&[], vec![], cache, false, now, STRIP_GRACE);
 
         assert_eq!(cache.len(), CACHE_CAP);
         assert!(!cache.contains_key(&format!("session:{}", total - 1)));
@@ -3329,9 +3492,30 @@ mod tests {
 
         let system = ui::strip::Strip::new("session:0".into(), "Sons du système".into());
 
+        let outputs = vec![
+            endpoint("output:x"),
+            endpoint("output:y"),
+            endpoint("output:cue"),
+            endpoint("output:z"),
+        ];
         assert_eq!(
-            mix_choices(&[first, second, hidden, system], Some("output:cue")),
+            mix_choices(
+                &[first, second, hidden, system],
+                Some("output:cue"),
+                &outputs
+            ),
             vec!["output:x".to_string(), "output:y".to_string()]
+        );
+    }
+
+    #[test]
+    fn mix_choices_skips_missing_outputs() {
+        let mut strip = ui::strip::Strip::new("input:a".into(), "A".into());
+        strip.selected_outputs = vec![Some("output:a".into()), Some("app:42".into())];
+        let outputs = vec![endpoint("output:a")];
+        assert_eq!(
+            mix_choices(&[strip], None, &outputs),
+            vec!["output:a".to_string()]
         );
     }
 
@@ -3935,6 +4119,21 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_drops_fallback_endpoint_keys() {
+        let mut mic = ui::strip::Strip::new("input:mic".into(), "Mic".into());
+        mic.selected_outputs = vec![Some("app:999998".into())];
+        let ghost = ui::strip::Strip::new("session:999999".into(), "Ghost".into());
+        let app = AudiokApp {
+            strips: vec![mic, ghost],
+            ..Default::default()
+        };
+
+        let profile = app.snapshot_profile(&Profile::default());
+        assert_eq!(profile.strips.len(), 1);
+        assert!(profile.strips[0].outputs.is_empty());
+    }
+
+    #[test]
     fn retry_pending_outputs_fills_slot_when_output_appears() {
         let mut app = AudiokApp {
             strips: vec![ui::strip::Strip::new("input:mic".into(), "Mic".into())],
@@ -3952,6 +4151,27 @@ mod tests {
         app.retry_pending_outputs(&HashSet::new());
         assert_eq!(app.strips[0].selected_outputs[0], Some("output:b".into()));
         assert!(app.pending_outputs.is_empty());
+    }
+
+    #[test]
+    fn refresh_reassigns_returning_output_without_manual_delete() {
+        let now = Instant::now();
+        let sources = vec![endpoint("input:mic")];
+        let mut strip = ui::strip::Strip::new("input:mic".into(), "Mic".into());
+        strip.selected_outputs = vec![Some("output:a".into())];
+
+        let (strips, _) = sync_strips(
+            &sources,
+            vec![strip],
+            HashMap::new(),
+            true,
+            now,
+            STRIP_GRACE,
+        );
+        assert_eq!(strips[0].selected_outputs, vec![Some("output:a".into())]);
+
+        let (strips, _) = sync_strips(&sources, strips, HashMap::new(), true, now, STRIP_GRACE);
+        assert_eq!(strips[0].selected_outputs, vec![Some("output:a".into())]);
     }
 
     #[test]
@@ -4059,15 +4279,16 @@ mod tests {
 
         let (strips, _) = sync_strips(
             &sources,
-            &[],
             vec![strip],
             HashMap::new(),
             true,
             now,
             STRIP_GRACE,
         );
-
-        assert_eq!(strips[0].selected_outputs, vec![Some("app:42".into())]);
+        assert_eq!(
+            strips[0].selected_outputs,
+            vec![Some("app:42".into()), Some("output:gone".into())]
+        );
     }
 
     #[test]
@@ -4132,6 +4353,96 @@ mod tests {
         assert!(should_restore(None, now));
         assert!(!should_restore(Some(now + REDIRECT_RETRY), now));
         assert!(should_restore(Some(now - REDIRECT_RETRY), now));
+    }
+
+    #[test]
+    fn input_policy_apps_keeps_present_grace_and_destination_only() {
+        let now = Instant::now();
+        let mut gone = ui::strip::Strip::new("session:42".into(), "App".into());
+        gone.present = false;
+        gone.last_seen = Some(now - Duration::from_secs(1));
+        let present = ui::strip::Strip::new("session:7".into(), "Other".into());
+        let apps = ["app:42", "app:7", "app:99"];
+        let redirected = HashMap::from([(42, [None, None, None])]);
+        let kept = input_policy_apps(
+            &apps,
+            &[gone, present],
+            &redirected,
+            now,
+            STRIP_GRACE,
+            |_| true,
+        );
+        assert_eq!(kept, vec!["app:42", "app:7", "app:99"]);
+    }
+
+    #[test]
+    fn input_policy_apps_drops_dead_expired_and_unredirected() {
+        let now = Instant::now();
+        let mut expired = ui::strip::Strip::new("session:42".into(), "Expired".into());
+        expired.present = false;
+        expired.last_seen = Some(now - STRIP_GRACE - Duration::from_secs(1));
+        let mut unredirected = ui::strip::Strip::new("session:43".into(), "Unredirected".into());
+        unredirected.present = false;
+        unredirected.last_seen = Some(now - Duration::from_secs(1));
+        let dead = ui::strip::Strip::new("session:44".into(), "Dead".into());
+        let apps = ["app:42", "app:43", "app:44"];
+        let redirected = HashMap::from([(42, [None, None, None])]);
+        let kept = input_policy_apps(
+            &apps,
+            &[expired, unredirected, dead],
+            &redirected,
+            now,
+            STRIP_GRACE,
+            |pid| pid == 42 || pid == 43,
+        );
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn protected_redirect_pids_keeps_grace_alive_redirected_app() {
+        let now = Instant::now();
+        let mut gone = ui::strip::Strip::new("session:42".into(), "Telegram".into());
+        gone.present = false;
+        gone.last_seen = Some(now - Duration::from_secs(1));
+        let redirected = HashMap::from([(42, [None, None, None])]);
+        let protected = protected_redirect_pids(&[gone], &redirected, now, STRIP_GRACE, |_| true);
+        assert!(protected.contains(&42));
+    }
+
+    #[test]
+    fn protected_redirect_pids_ignores_grace_app_not_redirected() {
+        let now = Instant::now();
+        let mut gone = ui::strip::Strip::new("session:42".into(), "Telegram".into());
+        gone.present = false;
+        gone.last_seen = Some(now - Duration::from_secs(1));
+        let protected =
+            protected_redirect_pids(&[gone], &HashMap::new(), now, STRIP_GRACE, |_| true);
+        assert!(!protected.contains(&42));
+    }
+
+    #[test]
+    fn protected_redirect_pids_drops_expired_or_dead_grace_app() {
+        let now = Instant::now();
+        let mut expired = ui::strip::Strip::new("session:42".into(), "Telegram".into());
+        expired.present = false;
+        expired.last_seen = Some(now - STRIP_GRACE - Duration::from_secs(1));
+        let mut dead = ui::strip::Strip::new("session:43".into(), "Discord".into());
+        dead.present = false;
+        dead.last_seen = Some(now - Duration::from_secs(1));
+        let redirected = HashMap::from([(42, [None, None, None]), (43, [None, None, None])]);
+        let protected =
+            protected_redirect_pids(&[expired, dead], &redirected, now, STRIP_GRACE, |_| false);
+        assert!(!protected.contains(&42));
+        assert!(!protected.contains(&43));
+    }
+
+    #[test]
+    fn protected_redirect_pids_includes_present_apps() {
+        let now = Instant::now();
+        let present = ui::strip::Strip::new("session:7".into(), "App".into());
+        let protected =
+            protected_redirect_pids(&[present], &HashMap::new(), now, STRIP_GRACE, |_| false);
+        assert!(protected.contains(&7));
     }
 
     #[test]

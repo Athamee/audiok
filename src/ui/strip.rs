@@ -191,7 +191,11 @@ impl Strip {
             let mut remove_index: Option<usize> = None;
             let slots = self.selected_outputs.clone();
             let own_app = own_app(&self.id);
-            for (i, sel) in self.selected_outputs.iter_mut().enumerate() {
+            let strip_id = self.id.clone();
+            let visible = visible_slot_indices(&self.selected_outputs, outputs);
+            let first_visible = visible.first().copied();
+            for &i in &visible {
+                let sel = &mut self.selected_outputs[i];
                 let excluded = excluded_ids(&slots, i, cue, own_app.as_deref());
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -201,7 +205,7 @@ impl Strip {
                         .and_then(|id| outputs.iter().find(|o| &o.id == id))
                         .map(|o| super::endpoint_label(aliases, o).to_string())
                         .unwrap_or_else(|| tr("(vide)").to_string());
-                    let combo = egui::ComboBox::from_id_salt(("out", self.id.as_str(), i))
+                    let combo = egui::ComboBox::from_id_salt(("out", strip_id.as_str(), i))
                         .width(combo_width)
                         .truncate()
                         .selected_text(super::combo_text(ui, &label, combo_width))
@@ -217,7 +221,7 @@ impl Strip {
                     {
                         *rename = sel.clone();
                     }
-                    if i > 0
+                    if Some(i) != first_visible
                         && ui
                             .add(egui::Button::new("-").min_size([24.0, combo_height].into()))
                             .clicked()
@@ -443,6 +447,26 @@ pub fn own_app(id: &str) -> Option<String> {
     id.strip_prefix("session:").map(|pid| format!("app:{pid}"))
 }
 
+fn visible_slot_indices(
+    selected: &[Option<String>],
+    outputs: &[crate::audio::devices::AudioEndpoint],
+) -> Vec<usize> {
+    let visible: Vec<usize> = selected
+        .iter()
+        .enumerate()
+        .filter(|(_, sel)| match sel {
+            None => true,
+            Some(id) => outputs.iter().any(|output| &output.id == id),
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if visible.is_empty() && !selected.is_empty() {
+        vec![0]
+    } else {
+        visible
+    }
+}
+
 fn excluded_ids<'a>(
     slots: &'a [Option<String>],
     index: usize,
@@ -553,6 +577,38 @@ mod tests {
         assert_eq!(super::own_app("session:42"), Some("app:42".to_string()));
         assert_eq!(super::own_app("app:7"), None);
         assert_eq!(super::own_app("input:mic"), None);
+    }
+
+    #[test]
+    fn visible_slots_hide_missing_outputs_but_keep_empty_chooser() {
+        let outputs = vec![
+            crate::audio::devices::AudioEndpoint {
+                id: "output:a".into(),
+                name: "A".into(),
+                kind: crate::audio::devices::EndpointKind::Hardware,
+            },
+            crate::audio::devices::AudioEndpoint {
+                id: "app:42".into(),
+                name: "App".into(),
+                kind: crate::audio::devices::EndpointKind::Software,
+            },
+        ];
+
+        let selected = vec![
+            Some("output:a".into()),
+            Some("output:gone".into()),
+            None,
+            Some("app:42".into()),
+        ];
+        assert_eq!(
+            super::visible_slot_indices(&selected, &outputs),
+            vec![0, 2, 3]
+        );
+
+        let all_missing = vec![Some("output:gone".into()), Some("app:7".into())];
+        assert_eq!(super::visible_slot_indices(&all_missing, &outputs), vec![0]);
+
+        assert!(super::visible_slot_indices(&[], &outputs).is_empty());
     }
 
     #[test]

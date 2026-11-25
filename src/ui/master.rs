@@ -16,7 +16,7 @@ fn mix_label(
         .unwrap_or_else(|| key.to_string())
 }
 
-fn cue_mode_text(ui: &egui::Ui, cue_mix_enabled: bool) -> egui::text::LayoutJob {
+fn cue_listen_text(ui: &egui::Ui, cue_mix_enabled: bool) -> egui::text::LayoutJob {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let color = ui.visuals().widgets.inactive.text_color();
     let format = |size: f32| egui::text::TextFormat {
@@ -29,11 +29,11 @@ fn cue_mode_text(ui: &egui::Ui, cue_mix_enabled: bool) -> egui::text::LayoutJob 
     let inactive = format((font.size - 2.0).max(1.0));
     let mut job = egui::text::LayoutJob::default();
     if cue_mix_enabled {
-        job.append(tr("Mixe"), 0.0, active);
-        job.append(tr("/casque"), 0.0, inactive);
+        job.append(tr("MIXE"), 0.0, active);
+        job.append(tr("/PFL"), 0.0, inactive);
     } else {
-        job.append(tr("Casque"), 0.0, active);
-        job.append(tr("/mixe"), 0.0, inactive);
+        job.append(tr("PFL"), 0.0, active);
+        job.append(tr("/MIXE"), 0.0, inactive);
     }
     job
 }
@@ -82,7 +82,6 @@ impl Master {
         background: &super::background::BackgroundCache,
         rename: &mut Option<String>,
         _reset: &mut Option<String>,
-        mix_reset: &mut Option<String>,
     ) -> (bool, egui::Rect, egui::Rect) {
         ui.vertical(|ui| {
             ui.set_min_width(super::COLUMN_WIDTH);
@@ -173,6 +172,46 @@ impl Master {
                 egui::StrokeKind::Outside,
             );
 
+            // Boutons de mixes en haut, dans l'ordre d'apparition
+            let has_mix = !mixes.is_empty();
+            let mix_valid = self
+                .cue_mix
+                .as_deref()
+                .is_some_and(|key| mixes.iter().any(|mix| mix == key));
+            if !mix_valid {
+                self.cue_mix = mixes.first().cloned();
+            }
+            if !has_mix {
+                self.cue_mix_enabled = false;
+            }
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                for key in mixes {
+                    let active = self.cue_mix.as_deref() == Some(key.as_str());
+                    let label = mix_label(key, outputs, aliases);
+                    let base_fill = ui.visuals().widgets.inactive.weak_bg_fill;
+                    let fill = super::fade_fill(
+                        ui.ctx(),
+                        egui::Id::unique(("master_mix_button", key.as_str())),
+                        active,
+                        base_fill,
+                        super::PFL_ACTIVE,
+                    );
+                    let button =
+                        egui::Button::new(super::combo_text(ui, &label, super::BUTTON_WIDTH))
+                            .min_size([super::BUTTON_WIDTH, 24.0].into())
+                            .fill(fill);
+                    if ui
+                        .add(button)
+                        .on_hover_text(tr("Sélectionne le mixe à régler/écouter."))
+                        .clicked()
+                    {
+                        self.cue_mix = Some(key.clone());
+                    }
+                    ui.add_space(4.0);
+                }
+            });
+
             // 2. Bas de master ancré en bas, aligné sur les tranches
             self.top_height = ui.cursor().top() - start_top;
             let cue = ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
@@ -191,19 +230,19 @@ impl Master {
                 ui.add_space(4.0);
 
                 // Fader du cue à 1/3 de la tranche, vumètre à 2/3
-                let (level, set_gain) = if self.cue_mix_enabled {
+                let (level, set_gain) = if self.cue_mix_enabled && self.cue_mix.is_some() {
                     (self.mix_level, 1.0)
                 } else {
                     (self.cue_level, self.cue_volume)
                 };
-                let level_text = if self.cue_mix_enabled {
+                let level_text = if self.cue_mix_enabled && self.cue_mix.is_some() {
                     match self.cue_mix.as_deref() {
-                        None => tr("Aucun mixe -∞ dB").to_string(),
                         Some(key) => format!(
                             "{} {}",
                             mix_label(key, outputs, aliases),
                             super::format_db(level)
                         ),
+                        None => format!("MIX {}", super::format_db(level)),
                     }
                 } else {
                     format!("CUE {}", super::format_db(level))
@@ -255,9 +294,8 @@ impl Master {
 
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, 14.0),
-                    egui::Layout::left_to_right(egui::Align::Min),
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                     |ui| {
-                        ui.add_space(width * 2.0 / 3.0 - 16.0);
                         ui.add(
                             egui::Label::new(egui::RichText::new(level_text).size(9.0))
                                 .truncate()
@@ -266,7 +304,7 @@ impl Master {
                     },
                 );
 
-                ui.add_space(12.0);
+                ui.add_space(4.0);
 
                 // Sélecteur de sortie du cue
                 let cue_label = self
@@ -290,112 +328,33 @@ impl Master {
                 {
                     *rename = self.cue_device.clone();
                 }
-                let hint = if self.bypass {
-                    tr("Bypass actif :\ncue inactif")
-                } else if !self.cue_mix_enabled {
-                    tr("Écoute PFL\nsélecteur bas")
-                } else if self.cue_mix.is_some() {
-                    tr("Réglage du mixe\nsélecteur haut")
-                } else {
-                    tr("Aucun mixe :\ncue muet")
-                };
-                ui.add(
-                    egui::Label::new(egui::RichText::new(hint).size(10.0))
-                        .halign(egui::Align::Center),
-                );
 
                 ui.add_space(4.0);
-                if self.cue_mix_enabled {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(super::BUTTON_WIDTH, 24.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            let selected = match self.cue_mix.as_deref() {
-                                None => tr("(aucun mixe)").to_string(),
-                                Some(key) => mix_label(key, outputs, aliases),
-                            };
-                            let items: Vec<(String, String)> = mixes
-                                .iter()
-                                .map(|key| (key.clone(), mix_label(key, outputs, aliases)))
-                                .collect();
-                            egui::ComboBox::from_id_salt("cue_mix")
-                                .width(super::BUTTON_WIDTH)
-                                .truncate()
-                                .selected_text(super::combo_text(
-                                    ui,
-                                    &selected,
-                                    super::BUTTON_WIDTH,
-                                ))
-                                .show_ui(ui, |ui| {
-                                    if items.is_empty() {
-                                        ui.label(tr("(aucun mixe)"));
-                                    }
-                                    for (key, label) in &items {
-                                        let active = self.cue_mix.as_deref() == Some(key.as_str());
-                                        if ui
-                                            .selectable_label(active, label)
-                                            .on_hover_text(tr(
-                                                "Écoute post-fader (volume/mute/solo suivis)",
-                                            ))
-                                            .clicked()
-                                        {
-                                            self.cue_mix = Some(key.clone());
-                                            ui.close();
-                                        }
-                                    }
-                                })
-                                .response
-                                .on_hover_text(tr("Mixe écouté sur la sortie cue."));
-                        },
-                    );
-                    ui.add_space(4.0);
-                }
                 ui.allocate_ui_with_layout(
                     egui::vec2(super::BUTTON_WIDTH, 24.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        let active = self.cue_mix_enabled && self.cue_mix.is_some();
-                        if ui
-                            .add_enabled(
-                                active,
-                                egui::Button::new(tr("Reset mixe"))
-                                    .min_size([super::BUTTON_WIDTH, 24.0].into()),
-                            )
-                            .on_hover_text(tr(
-                                "Réinitialiser le mixe sélectionné pour toutes les tranches",
-                            ))
-                            .clicked()
-                        {
-                            *mix_reset = self.cue_mix.clone();
-                        }
-                    },
-                );
-                ui.add_space(4.0);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(super::BUTTON_WIDTH, 24.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let text = cue_mode_text(ui, self.cue_mix_enabled);
+                        let can_mix = has_mix && self.cue_mix.is_some();
+                        let text = cue_listen_text(ui, self.cue_mix_enabled && can_mix);
                         let base_fill = ui.visuals().widgets.inactive.weak_bg_fill;
                         let mixe_fill = super::fade_fill(
                             ui.ctx(),
-                            egui::Id::unique("master_mixe"),
-                            self.cue_mix_enabled,
+                            egui::Id::unique("master_cue_listen"),
+                            self.cue_mix_enabled && can_mix,
                             base_fill,
                             super::PFL_ACTIVE,
                         );
                         let button = egui::Button::new(text)
                             .min_size([super::BUTTON_WIDTH, 24.0].into())
                             .fill(mixe_fill);
-                        if ui
-                            .add(button)
-                            .on_hover_text(tr("Écoute : Casque (PFL) ou Mixe d'une sortie"))
+                        let response = ui.add_enabled(can_mix, button);
+                        if response
+                            .on_hover_text(tr(
+                                "Écoute CUE : post-fader du mixe sélectionné, ou PFL pré-fader.",
+                            ))
                             .clicked()
                         {
                             self.cue_mix_enabled = !self.cue_mix_enabled;
-                            if self.cue_mix_enabled && self.cue_mix.is_none() {
-                                self.cue_mix = mixes.first().cloned();
-                            }
                         }
                     },
                 );
@@ -414,21 +373,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cue_mode_text_marks_inactive_part_smaller() {
+    fn cue_listen_text_marks_inactive_part_smaller() {
         egui::__run_test_ui(|ui| {
-            let casque = cue_mode_text(ui, false);
-            assert_eq!(casque.text, "Casque/mixe");
-            assert_eq!(casque.sections.len(), 2);
-            assert!(
-                casque.sections[1].format.font_id.size < casque.sections[0].format.font_id.size
-            );
+            let pfl = cue_listen_text(ui, false);
+            assert_eq!(pfl.text, "PFL/MIXE");
+            assert_eq!(pfl.sections.len(), 2);
+            assert!(pfl.sections[1].format.font_id.size < pfl.sections[0].format.font_id.size);
 
-            let mixe = cue_mode_text(ui, true);
-            assert_eq!(mixe.text, "Mixe/casque");
+            let mixe = cue_listen_text(ui, true);
+            assert_eq!(mixe.text, "MIXE/PFL");
             assert_eq!(mixe.sections.len(), 2);
-            assert!(
-                casque.sections[0].format.font_id.size > casque.sections[1].format.font_id.size
-            );
+            assert!(mixe.sections[1].format.font_id.size < mixe.sections[0].format.font_id.size);
         });
     }
 
@@ -442,7 +397,6 @@ mod tests {
         let mut master = Master::default();
         let mut rename = None;
         let mut reset = None;
-        let mut mix_reset = None;
         egui::__run_test_ui(|ui| {
             let max_rect = ui.max_rect();
             let expected_bottom =
@@ -457,7 +411,6 @@ mod tests {
                 &background,
                 &mut rename,
                 &mut reset,
-                &mut mix_reset,
             );
             assert!(rect.width() > 0.0);
             assert!(rect.height() > 0.0);

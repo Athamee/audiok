@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::i18n::{deserialize_language, Language};
 
 use super::profile::{
-    safe_gain, sanitize_owned_text, sanitize_text, valid_key, Profile, MAX_VOLUME_GAIN,
+    is_fallback_string_key, safe_gain, sanitize_owned_text, sanitize_text, valid_key, Profile,
+    MAX_VOLUME_GAIN,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +41,8 @@ impl Settings {
         if self.aliases.len() > MAX_ALIASES {
             self.aliases.clear();
         }
-        self.aliases.retain(|key, _| valid_key(key));
+        self.aliases
+            .retain(|key, _| valid_key(key) && !is_fallback_string_key(key));
         for value in self.aliases.values_mut() {
             sanitize_owned_text(value);
         }
@@ -167,12 +169,14 @@ mod tests {
             aliases: HashMap::from([
                 ("".into(), "x".into()),
                 ("app:a".into(), "alias\n[hotkey]".into()),
+                ("app:Processus 42|other".into(), "x".into()),
             ]),
             ..Default::default()
         };
         settings.sanitize();
         assert_eq!(settings.cue_volume, 1.0);
         assert_eq!(settings.aliases.len(), 1);
+        assert!(!settings.aliases.contains_key("app:Processus 42|other"));
         assert_eq!(
             settings.aliases.get("app:a").map(String::as_str),
             Some("alias [hotkey]")
